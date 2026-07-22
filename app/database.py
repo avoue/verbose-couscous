@@ -18,17 +18,25 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 def init_db(database_url: str) -> None:
     """Create the global async engine and session factory. Call once at startup.
 
-    statement_cache_size=0 disables asyncpg's prepared-statement cache, which is
-    required when connecting through a pgbouncer-style transaction pooler (e.g.
-    Supabase's Transaction Pooler / Supavisor on port 6543). It's a no-op and
-    harmless against a direct connection or session pooler, so it's safe to
-    always set.
+    Two separate caches need to be disabled to work with a pgbouncer-style
+    transaction pooler (e.g. Supabase's Transaction Pooler / Supavisor on port
+    6543), because each statement may be routed to a different backend
+    connection:
+      - statement_cache_size=0 disables asyncpg's own prepared-statement cache.
+      - prepared_statement_cache_size=0 disables SQLAlchemy's *own* asyncpg
+        prepared-statement cache, which sits on top of asyncpg's and is a
+        separate setting.
+    Both are no-ops against a direct connection or session pooler, so it's
+    safe to always set them.
     """
     global _engine, _session_factory
     _engine = create_async_engine(
         database_url,
         pool_pre_ping=True,
-        connect_args={"statement_cache_size": 0},
+        connect_args={
+            "statement_cache_size": 0,
+            "prepared_statement_cache_size": 0,
+        },
     )
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False, class_=AsyncSession)
 
