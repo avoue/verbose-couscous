@@ -226,4 +226,12 @@ async def _resolve_bet(session: AsyncSession, user: User, bet: int, reply_target
 
     nickname = user.nickname or "Игрок"
     text, entities = _build_result_message(nickname, bet, win, user.balance)
-    await bot.send_message(chat_id=reply_target.chat.id, text=text, entities=entities)
+    # parse_mode=None is required here: the bot has a global default parse_mode
+    # (HTML). If parse_mode is set on a call, Telegram ignores the `entities`
+    # parameter entirely, so the custom emoji would silently fail to render.
+    await bot.send_message(
+        chat_id=reply_target.chat.id,
+        text=text,
+        entities=entities,
+        parse_mode=None,
+    )
