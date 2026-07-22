@@ -1,6 +1,8 @@
-from aiogram import F, Router
+import asyncio
+
+from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, MessageEntity
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_session_factory
@@ -8,10 +10,67 @@ from ..keyboards import MAIN_MENU_BUTTONS, bet_amount_kb, rules_accept_kb
 from ..models import GameHistory, User
 from ..services import get_user_by_telegram_id
 from ..states import BetStates
-from ..utils import roll_dice
 from .rules import RULES_TEXT
 
 router = Router(name="dice")
+
+# Custom emoji IDs supplied for the redesigned result messages.
+EMOJI_COIN = "5409048419211682843"       # generic credits/coin icon
+EMOJI_WIN_ARROW = "5449503162849318231"  # up arrow / win marker
+EMOJI_LOSS_MARK = "5447183459602669338"  # loss marker
+EMOJI_BULLET = "5449683594425410231"     # separator / bullet
+
+# How long Telegram's native dice animation takes to fully play out.
+DICE_ANIMATION_SECONDS = 4.0
+
+
+def _build_result_message(nickname: str, bet: int, win: bool, balance: int) -> tuple[str, list[MessageEntity]]:
+    """Build the win/loss announcement text with custom emoji entities mixed in."""
+    entities: list[MessageEntity] = []
+    parts: list[str] = []
+    cursor = 0
+
+    def add_text(t: str) -> None:
+        nonlocal cursor
+        parts.append(t)
+        cursor += len(t)
+
+    def add_emoji(custom_emoji_id: str) -> None:
+        nonlocal cursor
+        placeholder = "🔸"
+        parts.append(placeholder)
+        entities.append(
+            MessageEntity(
+                type="custom_emoji",
+                offset=cursor,
+                length=len(placeholder),
+                custom_emoji_id=custom_emoji_id,
+            )
+        )
+        cursor += len(placeholder)
+
+    if win:
+        add_text(f'"{nickname}" побеждает в игре 🎲 на {bet} ')
+        add_emoji(EMOJI_COIN)
+        add_text(" ")
+        add_emoji(EMOJI_WIN_ARROW)
+        add_text(f" {bet} ")
+        add_emoji(EMOJI_BULLET)
+        add_text(f"\nВыигрыш {bet * 2} ")
+        add_emoji(EMOJI_COIN)
+        add_text(f"\n\n💰 Баланс: {balance} кредитов.")
+    else:
+        add_text(f'"{nickname}" проигрывает {bet} ')
+        add_emoji(EMOJI_COIN)
+        add_text(" в игре 🎲 ")
+        add_emoji(EMOJI_LOSS_MARK)
+        add_text(" ")
+        add_emoji(EMOJI_BULLET)
+        add_text(f"\nПроигрыш {bet} ")
+        add_emoji(EMOJI_COIN)
+        add_text(f"\n\n💰 Баланс: {balance} кредитов.")
+
+    return "".join(parts), entities
 
 
 @router.message(F.text == MAIN_MENU_BUTTONS["play"])
@@ -68,7 +127,7 @@ async def ask_custom_bet(callback: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data.startswith("bet_"))
-async def process_preset_bet(callback: CallbackQuery):
+async def process_preset_bet(callback: CallbackQuery, bot: Bot):
     payload = callback.data.split("_", 1)[1]
     # "cancel" and "custom" are handled by the dedicated handlers above, which
     # (being registered first) intercept those callback_data values before
@@ -84,13 +143,12 @@ async def process_preset_bet(callback: CallbackQuery):
             return
 
         bet = user.balance if payload == "all" else int(payload)
-        await _resolve_bet(session, user, bet, callback.message)
-
-    await callback.answer()
+        await callback.answer()
+        await _resolve_bet(session, user, bet, callback.message, bot)
 
 
 @router.message(BetStates.waiting_for_amount)
-async def process_custom_bet_amount(message: Message, state: FSMContext):
+async def process_custom_bet_amount(message: Message, state: FSMContext, bot: Bot):
     text = (message.text or "").strip()
     if not text.isdigit():
         await message.answer("Введи целое положительное число.")
@@ -116,15 +174,23 @@ async def process_custom_bet_amount(message: Message, state: FSMContext):
             return
 
         await state.clear()
-        await _resolve_bet(session, user, bet, message)
+        await _resolve_bet(session, user, bet, message, bot)
 
 
-async def _resolve_bet(session: AsyncSession, user: User, bet: int, reply_target) -> None:
+async def _resolve_bet(session: AsyncSession, user: User, bet: int, reply_target, bot: Bot) -> None:
     if bet <= 0 or bet > user.balance:
         await reply_target.answer("Некорректная сумма ставки.")
         return
 
-    result = roll_dice()
+    # Throw the actual animated Telegram dice — this IS the game, not a decoration.
+    # message.dice.value is Telegram's own server-side roll (1-6), so the visible
+    # animation always matches the real outcome.
+    dice_message = await bot.send_dice(chat_id=reply_target.chat.id, emoji="🎲")
+    result = dice_message.dice.value
+
+    # Let the animation fully play out in the user's client before revealing the outcome.
+    await asyncio.sleep(DICE_ANIMATION_SECONDS)
+
     win = result >= 4
     payout = bet if win else -bet  # net balance change
 
@@ -147,18 +213,5 @@ async def _resolve_bet(session: AsyncSession, user: User, bet: int, reply_target
     await session.commit()
 
     nickname = user.nickname or "Игрок"
-    if win:
-        text = (
-            f"🎲 Выпало: <b>{result}</b>\n\n"
-            f"{nickname} побеждает в игре 🎲 на {bet} кредитов!\n"
-            f"Выигрыш: {bet * 2} кредитов.\n\n"
-            f"💰 Баланс: {user.balance} кредитов."
-        )
-    else:
-        text = (
-            f"🎲 Выпало: <b>{result}</b>\n\n"
-            f"{nickname} проигрывает {bet} кредитов в игре 🎲.\n\n"
-            f"💰 Баланс: {user.balance} кредитов."
-        )
-
-    await reply_target.answer(text)
+    text, entities = _build_result_message(nickname, bet, win, user.balance)
+    await bot.send_message(chat_id=reply_target.chat.id, text=text, entities=entities)
