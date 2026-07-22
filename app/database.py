@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
 
 
 class Base(DeclarativeBase):
@@ -18,21 +19,24 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 def init_db(database_url: str) -> None:
     """Create the global async engine and session factory. Call once at startup.
 
-    Two separate caches need to be disabled to work with a pgbouncer-style
-    transaction pooler (e.g. Supabase's Transaction Pooler / Supavisor on port
-    6543), because each statement may be routed to a different backend
-    connection:
-      - statement_cache_size=0 disables asyncpg's own prepared-statement cache.
-      - prepared_statement_cache_size=0 disables SQLAlchemy's *own* asyncpg
-        prepared-statement cache, which sits on top of asyncpg's and is a
-        separate setting.
-    Both are no-ops against a direct connection or session pooler, so it's
-    safe to always set them.
+    Connecting through a pgbouncer-style transaction pooler (e.g. Supabase's
+    Transaction Pooler / Supavisor on port 6543) needs three things to avoid
+    "prepared statement already/does not exist" errors, since each statement
+    may be routed to a different backend connection:
+      - poolclass=NullPool: SQLAlchemy does NOT keep its own persistent
+        connection pool on top of the external pooler. Each checkout opens a
+        fresh asyncpg connection and closes it cleanly afterwards, so no
+        prepared-statement state leaks between logical requests.
+      - statement_cache_size=0: disables asyncpg's own prepared-statement cache.
+      - prepared_statement_cache_size=0: disables SQLAlchemy's *own* asyncpg
+        prepared-statement cache, a separate setting on top of asyncpg's.
+    All three are harmless no-ops against a direct connection or session
+    pooler, so it's safe to always set them.
     """
     global _engine, _session_factory
     _engine = create_async_engine(
         database_url,
-        pool_pre_ping=True,
+        poolclass=NullPool,
         connect_args={
             "statement_cache_size": 0,
             "prepared_statement_cache_size": 0,
