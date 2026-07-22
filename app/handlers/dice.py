@@ -14,14 +14,25 @@ from .rules import RULES_TEXT
 
 router = Router(name="dice")
 
-# Custom emoji IDs supplied for the redesigned result messages.
-EMOJI_COIN = "5409048419211682843"       # generic credits/coin icon
-EMOJI_WIN_ARROW = "5449503162849318231"  # up arrow / win marker
-EMOJI_LOSS_MARK = "5447183459602669338"  # loss marker
-EMOJI_BULLET = "5449683594425410231"     # separator / bullet
+# Custom emoji IDs supplied for the redesigned result messages, mapped to
+# their real fallback glyphs (confirmed from Telegram's own entities when
+# these emoji are sent as plain text — see conversation history).
+EMOJI_COIN = ("5409048419211682843", "💵")        # money / credits icon
+EMOJI_CROSS = ("5449503162849318231", "❌")        # cross mark
+EMOJI_ARROW_UP = ("5449683594425410231", "🔼")     # up-pointing triangle (used as separator)
+EMOJI_ARROW_DOWN = ("5447183459602669338", "🔽")   # down-pointing triangle
 
 # How long Telegram's native dice animation takes to fully play out.
 DICE_ANIMATION_SECONDS = 4.0
+
+
+def _utf16_len(text: str) -> int:
+    """Telegram entity offsets/lengths are counted in UTF-16 code units, NOT
+    Python's code-point-based len(). Characters outside the Basic Multilingual
+    Plane (most emoji, including 🎲 and the custom-emoji fallback glyphs below)
+    are encoded as UTF-16 surrogate pairs (2 units), so len() alone undercounts
+    them and silently misaligns every entity that follows."""
+    return len(text.encode("utf-16-le")) // 2
 
 
 def _build_result_message(nickname: str, bet: int, win: bool, balance: int) -> tuple[str, list[MessageEntity]]:
@@ -33,29 +44,29 @@ def _build_result_message(nickname: str, bet: int, win: bool, balance: int) -> t
     def add_text(t: str) -> None:
         nonlocal cursor
         parts.append(t)
-        cursor += len(t)
+        cursor += _utf16_len(t)
 
-    def add_emoji(custom_emoji_id: str) -> None:
+    def add_emoji(emoji: tuple[str, str]) -> None:
         nonlocal cursor
-        placeholder = "🔸"
+        custom_emoji_id, placeholder = emoji
         parts.append(placeholder)
         entities.append(
             MessageEntity(
                 type="custom_emoji",
                 offset=cursor,
-                length=len(placeholder),
+                length=_utf16_len(placeholder),
                 custom_emoji_id=custom_emoji_id,
             )
         )
-        cursor += len(placeholder)
+        cursor += _utf16_len(placeholder)
 
     if win:
         add_text(f'"{nickname}" побеждает в игре 🎲 на {bet} ')
         add_emoji(EMOJI_COIN)
         add_text(" ")
-        add_emoji(EMOJI_WIN_ARROW)
+        add_emoji(EMOJI_CROSS)
         add_text(f" {bet} ")
-        add_emoji(EMOJI_BULLET)
+        add_emoji(EMOJI_ARROW_UP)
         add_text(f"\nВыигрыш {bet * 2} ")
         add_emoji(EMOJI_COIN)
         add_text(f"\n\n💰 Баланс: {balance} кредитов.")
@@ -63,14 +74,15 @@ def _build_result_message(nickname: str, bet: int, win: bool, balance: int) -> t
         add_text(f'"{nickname}" проигрывает {bet} ')
         add_emoji(EMOJI_COIN)
         add_text(" в игре 🎲 ")
-        add_emoji(EMOJI_LOSS_MARK)
+        add_emoji(EMOJI_ARROW_DOWN)
         add_text(" ")
-        add_emoji(EMOJI_BULLET)
+        add_emoji(EMOJI_ARROW_UP)
         add_text(f"\nПроигрыш {bet} ")
         add_emoji(EMOJI_COIN)
         add_text(f"\n\n💰 Баланс: {balance} кредитов.")
 
     return "".join(parts), entities
+
 
 
 @router.message(F.text == MAIN_MENU_BUTTONS["play"])
